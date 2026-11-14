@@ -1,0 +1,28 @@
+GPU: NVIDIA GeForce RTX 3090 (sm_86)
+Kernels: rope=cuda  reduce=cuda  gemm=cuda  attention=cuda  provided=cuda
+Library: /workspace/edin-mls-26-autumn/hw1-asr/build/sm_86/libasr_kernels.so
+Loading the model (about 9 GB of float32 weights)...
+Loaded in 31.7 s
+Audio: 3.50 s, mel features (1, 128, 3000), prompt 59 tokens
+  run 1:   2383.5 ms  (13 tokens)
+  run 2:   2385.8 ms  (13 tokens)
+  run 3:   2387.2 ms  (13 tokens)
+
+GPU time per operation, one transcription (2479.8 ms in kernels):
+  operation    runs on    calls   total ms   share
+  linear       cuda        2757     1991.7   80.3%
+  attention    cuda         396      366.2   14.8%
+  rmsnorm      cuda         741      111.2    4.5%
+  silu_mul     cuda         364        3.2    0.1%
+  rope         cuda         396        2.8    0.1%
+  softmax      cuda          13        1.9    0.1%
+  layernorm    cuda          65        1.8    0.1%
+  embedding    cuda          13        0.8    0.0%
+  im2col       cuda           2        0.1    0.0%
+
+Time: 2385.5 ms per transcription (+/- 1.5 ms), 183.5 ms per token
+Peak GPU memory: 8.56 GiB
+Transcription: Concord returned to its place amidst the tents.
+Expected:      Concord returned to its place amidst the tents
+Accuracy: 100.0%
+Status: PASS
