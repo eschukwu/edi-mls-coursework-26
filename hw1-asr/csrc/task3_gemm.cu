@@ -32,26 +32,41 @@ __global__ void linear_tiled_kernel(const float* x, const float* w, const float*
   for (int k0 = 0; k0 < K; k0 += TILE) {
     // ======================== BLANK 3.1 =========================
     // Load this thread's element of the x tile into xs. Use 0 outside x.
-    // YOUR CODE HERE
+    const int x_col = k0 + tx;
+    xs[ty][tx] = (row < M && x_col < K) ?  x[static_cast<size_t>(row) * K + x_col] : 0.0f;
     // ============================================================
 
     // ======================== BLANK 3.2 =========================
     // Load this thread's element of the w tile, so that ws[n][k] holds
     // w[blockIdx.x * TILE + n][k0 + k]. Use 0 outside w. Threads with consecutive
     // tx must read consecutive addresses of w.
-    // YOUR CODE HERE
+    const int w_row = blockIdx.x * TILE + ty;
+    const int w_col = k0 + tx;
+    ws[ty][tx] = (w_row < N && w_col < K) ? w[static_cast<size_t>(w_row) * K + w_col] : 0.0f;
     // ============================================================
 
     // ======================== BLANK 3.3 =========================
     // Add this K step's contribution to acc.
-    // YOUR CODE HERE
+    __syncthreads();
+    for (int k = 0; k < TILE; ++k) {
+      acc += xs[ty][k] * ws[tx][k];
+    }
+    __syncthreads();
     // ============================================================
   }
 
   // ======================== BLANK 3.4 =========================
   // Epilogue: for outputs inside y, add bias[col] (bias may be nullptr), apply
   // gelu() when act == ACT_GELU, and store.
-  // YOUR CODE HERE
+  if (row < M && col < N) {
+    if (bias != nullptr) {
+      acc += bias[col];
+    }
+    if (act == ACT_GELU) {
+      acc = gelu(acc);
+    }
+    y[static_cast<size_t>(row) * N + col] = acc;
+  }
   // ============================================================
 }
 
