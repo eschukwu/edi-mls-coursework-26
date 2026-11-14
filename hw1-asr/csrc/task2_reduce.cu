@@ -11,6 +11,8 @@
 #include "asr_kernels.h"
 #include "task2_reduce.cuh"
 
+#include "../../../../usr/include/math.h"
+
 constexpr int REDUCE_THREADS = 256;  // threads per block: a multiple of 32, at most 1024
 
 // Worked example. LayerNorm: y = (x - mean) / sqrt(var + eps) * weight + bias
@@ -42,7 +44,24 @@ __global__ void rmsnorm_kernel(const float* x, const float* weight, float* y, in
 
   // ======================== BLANK 2.5 =========================
   // RMSNorm of this row: y = x / sqrt(mean(x^2) + eps) * weight.
-  // YOUR CODE HERE
+  // 1. Each thread calculates local sum of squares across frid stride
+  float sum_sq = 0.0f;
+  for (int i = threadIdx.x; i < cols; i += blockDim.x) {
+    float val = xr[i];
+    sum_sq += val * val;
+  }
+
+   // 2. Reduce total sum of squares across the block
+   float total_sum_sq = block_reduce_sum(sum_sq);
+
+  // 3. Compute scale facto: 1 / sqrt(mean(x^2) + eps)
+  float mean_sq = total_sum_sq / static_cast<float>(cols);
+  float rrms = rsqrtf(mean_sq + eps);
+
+  // 4. Normalize and apply weight
+  for (int i = threadIdx.x; i < cols; i += blockDim.x) {
+    yr[i] = xr[i] * rrms * weight[i];
+  }
   // ============================================================
 }
 
@@ -58,12 +77,52 @@ __global__ void softmax_kernel(const float* x, float* y, int cols) {
   // ======================== BLANK 2.6 =========================
   // Pass 1: set row_max and row_sum (the sum of exp(x - row_max) over the row),
   // reading x only once, with MaxSum.
-  // YOUR CODE HERE
+
+  //1. Local accumulation per thread using MaxSum
+  MaxSum ms = {-INFINITY, 0.0f};
+  for (int i = threadIdx.x; i < cols; i += blockDim.x) {
+    ms = maxsum_merge(ms, MaxSum{xr[i], 1.0f});
+  }
+
+  // 2. Intra-warp reduction of MaxSum structs
+   for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+     MaxSum other;
+     other.m = __shfl_xor_sync(0xffffffff, ms.m, offset);
+     other.l = __shfl_xor_sync(0xffffffff, ms.l, offset);
+     ms = maxsum_merge(ms, other);
+   }
+
+  // 3. Store warp results in shared memory
+  __shared__ MaxSum partial[WARP_SIZE];
+  const int lane = threadIdx.x % WARP_SIZE;
+  const int warp = threadIdx.x / WARP_SIZE;
+  const int num_warps = blockDim.x / WARP_SIZE;
+
+  if (lane == 0) partial[warp] = ms;
+  __syncthreads();
+
+  // 4. Every warp loads partial[lane] and reduces again
+  ms = (lane < num_warps) ? partial[lane] : MaxSum{-INFINITY, 0.0f};
+  for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+    MaxSum other;
+    other.m = __shfl_xor_sync(0xffffffff, ms.m, offset);
+    other.l = __shfl_xor_sync(0xffffffff, ms.l, offset);
+    ms = maxsum_merge(ms, other);
+  }
+  __syncthreads();
+
+  row_max = ms.m;
+  row_sum = ms.l;
+
+
   // ============================================================
 
   // ======================== BLANK 2.7 =========================
   // Pass 2: y = exp(x - row_max) / row_sum.
-  // YOUR CODE HERE
+  float inv_row_sum = 1.0f / row_sum;
+  for (int i = threadIdx.x; i < cols; i += blockDim.x) {
+    yr[i] = expf(xr[i] - row_max) * inv_row_sum;
+  }
   // ============================================================
 }
 
