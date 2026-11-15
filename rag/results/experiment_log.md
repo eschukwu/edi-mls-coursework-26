@@ -180,3 +180,54 @@ Paired (`paired_answers.py`): R@5 up (24) +0.118, better/worse/same 11/3/10; R@5
 - Paired (`paired_answers.py`, 3-repeat means): R@5 up (24) +.144, 14/4/6 (sign test p≈.03); R@5 down (15) −.093, 2/8/5; all 39 +.053, CI [−.028, +.135], p .20
 - vs 1 repeat: same direction, ties 18 → 11, CI lower bound −.075 → −.028
 - Scaled to 350 queries ≈ +.006
+
+## 2026-11-16 Our kernels: verification + end-to-end timing (damnii07 RTX 2080 Ti, CUDA 12.8.0, ASR_CUDA=all)
+- asr_worker.py enables kernels via ops.set_cuda_groups(args.cuda) and errors if the built library is missing (no silent PyTorch fallback)
+- e2e_timing.py --n 5: ASR median 3610 ms (vs 1521 ms PyTorch, 20 q) → kernels in use; transcripts = cache 5/5
+- Median: rerank 86 ms (1.6%), generation 6.4 s (ELM noise), end-to-end 10.0 s (vs 6.4 s PyTorch)
+- ASR share ~41% (vs ~25%); one-off ASR load 117 s
+- TODO (optional): --n 20 for a matched comparison
+
+## 2026-11-16 End-to-end timing with our kernels, 20 queries (damnii RTX 2080 Ti, CUDA 12.8.0, ASR_CUDA=all)
+- Same 20 practice queries (seed 0) as the PyTorch run; transcripts = cache 20/20
+- Median: ASR 4559 ms (vs 1521 PyTorch, ~3.0×), encoding 34, retrieval 2.6, rerank 84 (1.3%), generation 5.0 s, end-to-end 9.8 s (vs 6.4 s)
+- ASR share ~50% (vs ~25%) → co-bottleneck with generation
+- One-off ASR load 88 s (file-system dependent)
+- Supersedes the 5-query run (ASR median 3.6 s)
+
+## 2026-11-16 HW1 run.sh on one node (damnii, RTX 2080 Ti sm_75, CUDA 12.8.0)
+- --cuda none (PyTorch): PASS, 1107.9 ± 7.5 ms/transcription, 85.2 ms/token, peak 8.88 GiB
+- --cuda all --profile: PASS, 3337.7 ± 5.0 ms, 256.7 ms/token, peak 8.56 GiB → 3.0× slower (matches 3.0× ASR slowdown in the pipeline)
+- Profile (3504 ms in kernels): linear/GEMM 2860.7 ms 81.6% (2757 calls), attention 466.1 ms 13.3%, rmsnorm 164.9 ms 4.7%, rope 3.1 ms, softmax 1.6 ms
+- → slowdown is the Task 3 GEMM vs cuBLAS
+- Note: earlier Task 1+2 only = 702 ms (damnii12, other day) < 1108 ms PyTorch → check task1,task2 and all-but-gemm on the same node
+- Outputs: hw1-asr/run_none_output.txt, profile_all_output.txt
+
+## 2026-11-16 HW1 per-config and per-op timing, one node (damnii RTX 2080 Ti, CUDA 12.8.0)
+- none 1108 ms | provided 1096 ms | task1,task2 790 ms | all 3338 ms (profile run of none: 1084 ms)
+- Profile none vs all (ms per transcription): linear 600.5 vs 2860.7; attention 317.0 vs 466.1; rope 265.9 vs 3.1; rmsnorm 87.3 vs 164.9; softmax 0.3 vs 1.6
+- Task 1+2 speed-up is RoPE (fused single kernel vs several PyTorch ops); our RMSNorm is ~2× slower (one block per row → low parallelism when decoding one token)
+- All-kernel slowdown: GEMM +2260 ms ≫ attention +149 ms ≫ RMSNorm +78 ms
+- Correction: earlier guess that RMSNorm fusion caused the speed-up was wrong
+
+## 2026-11-16 Failure analysis completed (manual, one annotator)
+- File: results/2026-11-15_failure_cases/cases.md (category legend at top; examples tagged [EXAMPLE: ...])
+- Broken by pure rerank (13): not reranker errors 6 (plausible alternative 4, ambiguous 1, vague 1); reranker errors 7 (wording mismatch/jargon 3, same-topic distractor 2, keyword distractor 1, ASR form 1); ASR form present in 4/13
+- Rescued (6 inspected + 2 earlier): links different wording, matches a key condition in a long query, finds the specific question among similar docs, matches a key phrase
+- RRF keeps all 17 rescues where rerank ranks gold 1–6, loses all 4 where it ranks gold 7–10 (outside rerank's own top 5 → no loss at k = 5)
+- Judged on 300-char snippets with spot checks of full text (e.g. Walmart gold doc has no "Walmart" anywhere)
+
+## 2026-11-16 RRF vs pure rerank, direct test (`rrf_vs_rerank.py`)
+- Inputs: fusion_eval ce_scores (practice, RRF c out-of-fold [5, 0], seed 0); heldout_eval rankings (dev); CPU node
+- Cross-check: practice and dev tables equal earlier runs exactly
+- Practice RRF − rerank: R@5 +.0287 [+.004, +.054] p .023; R@10 +.0197 p .030; MRR +.0333 p .002; NDCG +.0261 p < .001; hit@5 RRF only 21 vs rerank only 9 (sign p .043)
+- Dev: R@5 +.0186 p .37; R@10 +.0143 p .52; MRR +.0300 p .11; NDCG +.0240 p .076; hit@5 8 vs 4
+- Output: results/2026-11-16_rrf_vs_rerank/summary.txt
+
+## 2026-11-16 k sweep, 3 judge repeats
+- Same answers as 2026-11-15_k_sweep; evaluate_answers.py --repeats 3 --api-retries 15 → judge3_k5/10/20
+- k = 10 crashed twice on the same query (judge returned malformed JSON: "Invalid control character") → q_cde8053b3855199a excluded from k = 10 and 20 (answers_k*_excl.jsonl); analysis on the 19 queries judged for all three k
+- Means: k5 .525 | k10 .469 | k20 .392 (all three dimensions fall)
+- Paired bootstrap: k20 − k5 −.133 [−.238, −.029] p .011; k10 − k5 −.056 p .44; k20 − k10 −.077 p .24; k20 vs k5 per query 5 better / 12 worse / 2 same
+- judge_noise (k5 vs k20): single-judgement sd .150; single-repeat differences −.079, −.145, −.175 (all negative)
+- Outputs: results/2026-11-15_k_sweep/judge3_k*/, paired_k5_k20.txt

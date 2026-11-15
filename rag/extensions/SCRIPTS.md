@@ -23,10 +23,6 @@ Code written by our group. Everything else under rag/ is supplied by the course.
 | failure_cases.py | Case file for manual failure analysis: rescued/broken queries under rerank and RRF with gold ranks and texts | fusion_eval ce_scores.jsonl, transcripts, corpus, qrels | markdown case file | analysis, active |
 | e2e_timing.py | End-to-end timing on one machine, baseline vs RRF: mirrors supplied RAGPipeline stages + rerank stage; load times; transcript reproducibility | audio, corpus, enc_a, reranker, rag/.env | answers+timings .jsonl, .summary.txt | experiment, active |
 | judge_noise.py | Judge reliability from judge_cache.jsonl with repeats: within-answer spread, agreement, repeat correlation, per-repeat system difference | two judge_cache.jsonl | printed table | analysis, active |
+| compare_transcripts.py | Compare two transcript caches (e.g. PyTorch vs our kernels): identical count, WER, largest differences | two transcript caches | printed report, optional csv | analysis, active |
+| rrf_vs_rerank.py | Direct test of combine vs replace: RRF minus pure rerank on practice (out-of-fold) and dev; paired bootstrap, per-query wins/losses with sign test | fusion_eval ce_scores.jsonl, heldout_eval rankings, enc_dev rankings, qrels | summary text | analysis, active |
 
-## 2026-11-15 Judge noise (`judge_noise.py` on judge3 caches, 39 queries × 3)
-- Identical scores across 3 repeats: baseline 21/39, RRF 25/39; repeat-1 vs repeat-2 correlation .70 / .81
-- Mean within-answer sd .057 (range .12); pooled single-judgement sd .136 (heavy-tailed: most answers stable, a few vary widely); sd of 3-repeat mean .078
-- Per-query |RRF − baseline| (3-repeat means) .167; mean +.053
-- Single-repeat estimates of the mean difference: +.049, +.077, +.032 → magnitude unreliable with 1 repeat, direction consistent
-- Implication: k-sweep (20 q, 1 repeat) differences ~.09 are borderline vs noise → report as "no gain", not "worse"

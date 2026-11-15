@@ -7,7 +7,7 @@ All numbers: practice split (350 queries) unless marked **dev** (125 queries). T
 1. Retrieval is the weak link, and its failures are mostly **ordering**, not absence.
 2. Giving the LLM **more** documents does not help → fix **which** 5 documents.
 3. **Replacing** enc_a's order with a reranker fixes some queries but breaks as many.
-4. **Combining** the two rankings (RRF) keeps most fixes and almost no breaks.
+4. **Combining** the two rankings (RRF) keeps most fixes and almost no breaks, and beats pure reranking (significant on practice; same direction on dev).
 5. The gain is stable on practice, but **smaller and not significant on held-out dev**.
 6. Answers **follow retrieval**: better where retrieval improves; net end-to-end gain small.
 7. Cost is small on GPU (~1–2% of end-to-end), larger on CPU; bigger models / deeper lists cost more for no RRF gain.
@@ -34,7 +34,7 @@ All numbers: practice split (350 queries) unless marked **dev** (125 queries). T
 ## E2 Reranker alone (pilot) → §4.2
 - Top-20 / 50 / 100: R@5 .411 / .399 / .388; R@10 .495 / .484 / .474; rescued/broken 21/13, 27/20, 28/26; 87 / 215 / 312 ms (GPU)
 - Claim: averages flat because of churn; deeper lists add more breaks than rescues
-- Wins: wording mismatch (q_9cd7, q_0c24); losses: names/acronyms ("B A A V O", SWIFT, U.S.), vague queries (to confirm in E12)
+- Wins: wording mismatch (q_9cd7, q_0c24); losses: names/acronyms ("B A A V O", SWIFT, U.S.), vague queries (to confirm in E11)
 - Source: `2026-11-14_rerank_pilot/`
 
 ## E3 Replace vs combine (main table) → §4.2, Table "methods"
@@ -127,9 +127,77 @@ GPU = H200 MIG 1g.18gb; CPU = Xeon Gold 6542Y, 4 cores. Median ms/query.
 - Claim: failures are semantic/vague, not missing keywords
 - Source: `2026-11-15_bm25_probe/`
 
-## E11 Failure analysis (manual) → §5 — **TODO**
-- Case file: `2026-11-15_failure_cases/cases.md` (rerank broken 13, rescued 21; RRF broken 3, rescued 17)
-- To fill: category + why per case; count categories; pick 2–3 examples (incl. ASR letter-spelled acronyms if confirmed)
+## E11 Failure analysis (manual, one annotator) → §5
+Case file: `2026-11-15_failure_cases/cases.md` (practice; enc_a top-20, RRF c=0). Category = main reason the gold doc crossed the top-10 boundary; "ASR form" recorded separately.
+
+**Broken by pure rerank (13): why the reranker pushed the gold doc out of the top 10**
+| Group | Category | n | Examples |
+| --- | --- | --- | --- |
+| Not reranker errors (6) | plausible alternative (top doc also answers; unlabelled) | 4 | 1099-B, APR + debt consolidation, small-business valuation, bond yields |
+| | ambiguous query | 1 | "initial price at market opening": IPO vs daily open |
+| | vague query (missing context) | 1 | "did my sales rep harm my credit" (gold relies on an unstated loan) |
+| Reranker errors (7) | wording mismatch (domain jargon) | 3 | SWIFT ↔ MIR, sell calls ↔ option writers, numbered records ↔ chart of accounts |
+| | same-topic distractor | 2 | $30k advice ↔ budgeting at 21; U.S. stock tax basics ↔ U.S. tax on foreign stocks |
+| | keyword distractor | 1 | ⭐ Walmart expired inventory ↔ Walmart wages/food stamps (enc_a 1 → rerank 12 → RRF 2) |
+| | ASR form | 1 | ⭐ "BA Avios" → "B A A V O" (enc_a 2 → rerank 18 → RRF 3) |
+- ASR form present (primary or secondary) in 4/13: "B A A V O", "A P R", "Ten Ninety Nine B", "thirty thousand dollars" vs "$30k"
+- Broken queries had gold at median enc_a rank 5 (range 1–10); RRF keeps 10/13 in the top 10
+- RRF still breaks 3 (enc_a 5/8/10 → rerank 19/17/12 → RRF 11): gold near the boundary + large reranker drop ($30k, option writers, SWIFT/MIR)
+- Jargon pattern (tentative, few cases): reranker links common terms (retirement ↔ IRA) but not niche ones (MIR, option writer, chart of accounts)
+
+**Rescued by pure rerank (21; 6 inspected + 2 earlier): why the reranker found what enc_a missed**
+| Category (reranker strength) | Cases |
+| --- | --- |
+| links different wording | retirement ↔ (Roth) IRA (ASR form); "metrics" ↔ return formula ⭐ (14 → 1 → 2); housing via stock exchange ↔ REIT ETFs (weak, rerank 10); earlier: payments ↔ checks, valuing options ↔ binomial pricing |
+| matches a key condition in a long query | rental conversion "if I need significant repairs" ↔ get contractor quotes (19 → 2 → 4) |
+| finds the specific question among similar docs | how a U.S. citizen buys foreign stocks (14 → 1 → 2), among docs on taxes etc. |
+| matches a key phrase | "improve your credit score" (16 → 8; gold only partly answers; reranker's top doc answers better) |
+
+**RRF vs pure rerank on rescues**
+- RRF keeps all 17 rescues where the reranker ranks gold 1–6, and loses all 4 where it ranks gold 7–10 (payments/checks, valuing options, credit score, REIT)
+- Those 4 are outside the reranker's own top 5 → at k = 5 RRF loses nothing the reranker alone would pass to the LLM (cost is on R@10 only)
+- Shared mechanism: enc_a compresses query and doc separately into one vector each; the cross-encoder reads them together, which helps (wording, conditions, intent) and hurts (keywords, same-topic docs) in the same situations
+- Caveat: categories are one annotator's judgement on 300-char snippets plus spot checks of full text
+
+## E12 Our CUDA kernels in the pipeline (teammate's Task 1–4; RTX 2080 Ti, CUDA 12.8.0, ASR_CUDA=all) → §2 / §4.4
+- make test: Task 1–4 ALL PASS; run.sh --cuda all: PASS, 3357 ± 10 ms per transcription, 258 ms/token, peak 8.56 GiB (vs 702 ms with Task 1+2 only)
+- All 350 practice transcripts identical to the PyTorch path (WER 0, 0 edits / 4493 words) → retrieval metrics identical; every RAG result holds for the full system with our kernels
+- Worker enables kernels via ops.set_cuda_groups and errors if the built library is missing (no silent fallback); speed confirms kernels in use
+- End-to-end, same 20 queries (seed 0), medians: ASR 4559 ms (ours) vs 1521 ms (PyTorch) ≈ 3.0×; ASR share ~50% vs ~25%; end-to-end 9.8 s vs 6.4 s (baseline retrieval); rerank 84 ms in both (1.3% / 2.3%)
+- Claim: kernels are correct end to end but slower than the library path (Task 3 GEMM / Task 4 attention replace cuBLAS-backed ops); with them, ASR becomes a co-bottleneck with generation; reranking stays ~1–2%
+- Per-kernel breakdown: see E13
+- Sources: `hw1-asr/test_all_output.txt`, `run_all_output.txt`, `2026-11-16_ours_asr/`
+
+## E13 HW1 kernel speed, one node (damnii, RTX 2080 Ti sm_75, CUDA 12.8.0, run.sh test audio 3.5 s / 13 tokens) → §2.2 / Appendix A
+| Config (`--cuda`) | ms / transcription | vs PyTorch |
+| --- | --- | --- |
+| none (PyTorch) | 1108 (1084 in profile run) | – |
+| provided | 1096 | −1% |
+| task1,task2 (+ provided) | 790 | −29% |
+| all | 3338 | ×3.0 |
+Per-operation GPU time, one transcription (`--profile`; sums exceed wall time due to per-op sync):
+| Operation (task) | calls | PyTorch ms | ours ms | ours vs PyTorch |
+| --- | --- | --- | --- | --- |
+| linear (T3 GEMM) | 2757 | 600.5 | 2860.7 | 4.8× slower |
+| attention (T4) | 396 | 317.0 | 466.1 | 1.5× slower |
+| rope (T1) | 396 | 265.9 | 3.1 | ~86× faster |
+| rmsnorm (T2) | 741 | 87.3 | 164.9 | 1.9× slower |
+| softmax (T2) | 13 | 0.3 | 1.6 | slower, negligible |
+- Task 1+2 speed-up comes from RoPE (one fused kernel vs PyTorch's several elementwise ops with temporaries: 0.67 ms → 8 µs per call); our RMSNorm is actually slower (likely one block per row → few blocks when decoding one token; low parallelism)
+- Slowdown with all kernels: GEMM (+2260 ms) ≫ attention (+149 ms) ≫ RMSNorm (+78 ms)
+- Outputs: hw1-asr/run_none_output.txt, run_provided_output.txt, run_task12_output.txt, profile_all_output.txt, profile_none_output.txt
+
+## E14 Combine vs replace: RRF minus pure rerank (direct test of the core claim) → §4.2 / §4.3
+| Split | ΔR@5 [95% CI], p | ΔR@10 | ΔMRR@10 | ΔNDCG@10 | hit@5 RRF only / rerank only (sign p) |
+| --- | --- | --- | --- | --- | --- |
+| practice (out-of-fold, 350) | +.0287 [+.004, +.054], .023 | +.0197 [+.002, +.038], .030 | +.0333 [+.012, +.055], .002 | +.0261 [+.011, +.041], <.001 | 21 / 9 (.043) |
+| dev (held out, 125) | +.0186 [−.021, +.059], .37 | +.0143 [−.027, +.057], .52 | +.0300 [−.007, +.068], .11 | +.0240 [−.002, +.053], .076 | 8 / 4 (.39) |
+- Practice: RRF beats pure rerank on all four metrics; MRR and NDCG survive Bonferroni over 8 tests (α/8 ≈ .006)
+- Dev: all four differences positive, none significant (n = 125); rank-sensitive metrics closest (NDCG p .076)
+- Magnitude replicates better than "RRF vs baseline": ΔMRR .033 → .030, ΔR@5 .029 → .019 (vs ΔR@10 over baseline .035 → .014)
+- Largest gain is at the top 5 (what the LLM sees): practice hit@5 21 vs 9
+- Cross-check: practice and dev tables equal E3/E5 exactly
+- Source: `2026-11-16_rrf_vs_rerank/summary.txt` (`rrf_vs_rerank.py`)
 
 ---
 
@@ -143,4 +211,4 @@ GPU = H200 MIG 1g.18gb; CPU = Xeon Gold 6542Y, 4 cores. Median ms/query.
 
 ## Video candidates
 - Q1 design choice: combine (RRF, ranks only) instead of replace; why
-- Q2 checking: baseline reproduced exactly; dev held-out (and that the gain shrank); transcripts 20/20 identical; CPU = GPU quality; listened to failed queries
+- Q2 checking: our kernels give 350/350 identical transcripts (WER 0); baseline reproduced exactly; dev held-out (and that the gain shrank); transcripts 20/20 identical; CPU = GPU quality; listened to failed queries
