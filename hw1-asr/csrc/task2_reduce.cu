@@ -36,33 +36,94 @@ __global__ void layernorm_kernel(const float* x, const float* weight, const floa
     yr[c] = (xr[c] - mean) * rstd * weight[c] + bias[c];
 }
 
-// RMSNorm (text decoder): y = x / sqrt(mean(x^2) + eps) * weight
-__global__ void rmsnorm_kernel(const float* x, const float* weight, float* y, int cols,
-                               float eps) {
+// // RMSNorm (text decoder): y = x / sqrt(mean(x^2) + eps) * weight
+// __global__ void rmsnorm_kernel(const float* x, const float* weight, float* y, int cols,
+//                                float eps) {
+//   const float* xr = x + static_cast<size_t>(blockIdx.x) * cols;
+//   float* yr = y + static_cast<size_t>(blockIdx.x) * cols;
+//
+//   // ======================== BLANK 2.5 =========================
+//   // RMSNorm of this row: y = x / sqrt(mean(x^2) + eps) * weight.
+//   // 1. Each thread calculates local sum of squares across frid stride
+//   float sum_sq = 0.0f;
+//   for (int i = threadIdx.x; i < cols; i += blockDim.x) {
+//     float val = xr[i];
+//     sum_sq += val * val;
+//   }
+//
+//    // 2. Reduce total sum of squares across the block
+//    float total_sum_sq = block_reduce_sum(sum_sq);
+//
+//   // 3. Compute scale facto: 1 / sqrt(mean(x^2) + eps)
+//   float mean_sq = total_sum_sq / static_cast<float>(cols);
+//   float rrms = rsqrtf(mean_sq + eps);
+//
+//   // 4. Normalize and apply weight
+//   for (int i = threadIdx.x; i < cols; i += blockDim.x) {
+//     yr[i] = xr[i] * rrms * weight[i];
+//   }
+//   // ============================================================
+// }
+
+// Vectorized RMSNorm: processes 4 floats (128 bits) per iteration
+__global__ void rmsnorm_kernel(const float* x, const float* weight, float* y, int cols, float eps) {
   const float* xr = x + static_cast<size_t>(blockIdx.x) * cols;
   float* yr = y + static_cast<size_t>(blockIdx.x) * cols;
 
-  // ======================== BLANK 2.5 =========================
-  // RMSNorm of this row: y = x / sqrt(mean(x^2) + eps) * weight.
-  // 1. Each thread calculates local sum of squares across frid stride
+  // Check if all pointers are 16-byte (128-bit) aligned
+  bool is_aligned = (reinterpret_cast<uintptr_t>(xr) % 16 == 0) &&
+    (reinterpret_cast<uintptr_t>(weight) % 16 == 0) &&
+      (reinterpret_cast<uintptr_t>(y) % 16 == 0) &&
+        (cols % 4 == 0);
+
   float sum_sq = 0.0f;
-  for (int i = threadIdx.x; i < cols; i += blockDim.x) {
-    float val = xr[i];
-    sum_sq += val * val;
+
+  if (is_aligned) {
+    // 1. Vectorized loop (4 floats per thread per stride)
+    const int num_vecs = cols / 4;
+    const float4* xr_vec = reinterpret_cast<const float4*>(xr);
+
+    for (int i = threadIdx.x; i < num_vecs; i += blockDim.x) {
+      float4 v = xr_vec[i];
+      sum_sq += v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w;
+    }
+  } else {
+    // Scalar fallback path
+    for (int i = threadIdx.x; i < cols; i += blockDim.x) {
+      float val = xr[i];
+      sum_sq += val * val;
+    }
   }
 
-   // 2. Reduce total sum of squares across the block
-   float total_sum_sq = block_reduce_sum(sum_sq);
-
-  // 3. Compute scale facto: 1 / sqrt(mean(x^2) + eps)
+  // Reduce sum across block and compute reciprocal RMS scale factor
+  float total_sum_sq = block_reduce_sum(sum_sq);
   float mean_sq = total_sum_sq / static_cast<float>(cols);
   float rrms = rsqrtf(mean_sq + eps);
 
-  // 4. Normalize and apply weight
-  for (int i = threadIdx.x; i < cols; i += blockDim.x) {
-    yr[i] = xr[i] * rrms * weight[i];
+  // Pass 2: Normalize & Store
+  if (is_aligned) {
+    const int num_vecs = cols / 4;
+    const float4* xr_vec = reinterpret_cast<const float4*>(xr);
+    const float4* weight_vec = reinterpret_cast<const float4*>(weight);
+    float4* yr_vec = reinterpret_cast<float4*>(yr);
+
+    for (int i = threadIdx.x; i < num_vecs; i += blockDim.x) {
+      float4 vx = xr_vec[i];
+      float4 vw = weight_vec[i];
+      float4 vy;
+
+      vy.x = vx.x * rrms * vw.x;
+      vy.y = vx.y * rrms * vw.y;
+      vy.z = vx.z * rrms * vw.z;
+      vy.w = vx.w * rrms * vw.w;
+      yr_vec[i] = vy;
+    }
+  } else {
+    // 2. Scalar cleanup store for remaining elements
+    for (int i = threadIdx.x; i < cols; i += blockDim.x) {
+      yr[i] = xr[i] * rrms * weight[i];
+    }
   }
-  // ============================================================
 }
 
 // Softmax over each row: y = exp(x - max) / sum(exp(x - max)).

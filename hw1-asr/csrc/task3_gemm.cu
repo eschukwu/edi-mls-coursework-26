@@ -18,56 +18,105 @@
 
 constexpr int TILE = 16;  // try 8 or 32 (32 x 32 = 1024 threads, the maximum per block)
 
-__global__ void linear_tiled_kernel(const float* x, const float* w, const float* bias,
-                                    float* y, int M, int N, int K, int act) {
-  __shared__ float xs[TILE][TILE];      // xs[m][k]: rows of x for this block
-  __shared__ float ws[TILE][TILE + 1];  // ws[n][k]: rows of w for this block (+1: see Try this)
+// __global__ void linear_tiled_kernel(const float* x, const float* w, const float* bias,
+//                                     float* y, int M, int N, int K, int act) {
+//   __shared__ float xs[TILE][TILE];      // xs[m][k]: rows of x for this block
+//   __shared__ float ws[TILE][TILE + 1];  // ws[n][k]: rows of w for this block (+1: see Try this)
+//
+//   const int tx = threadIdx.x;
+//   const int ty = threadIdx.y;
+//   const int row = blockIdx.y * TILE + ty;  // the output row this thread computes
+//   const int col = blockIdx.x * TILE + tx;  // the output column this thread computes
+//
+//   float acc = 0.0f;
+//   for (int k0 = 0; k0 < K; k0 += TILE) {
+//     // ======================== BLANK 3.1 =========================
+//     // Load this thread's element of the x tile into xs. Use 0 outside x.
+//     const int x_col = k0 + tx;
+//     xs[ty][tx] = (row < M && x_col < K) ?  x[static_cast<size_t>(row) * K + x_col] : 0.0f;
+//     // ============================================================
+//
+//     // ======================== BLANK 3.2 =========================
+//     // Load this thread's element of the w tile, so that ws[n][k] holds
+//     // w[blockIdx.x * TILE + n][k0 + k]. Use 0 outside w. Threads with consecutive
+//     // tx must read consecutive addresses of w.
+//     const int w_row = blockIdx.x * TILE + ty;
+//     const int w_col = k0 + tx;
+//     ws[ty][tx] = (w_row < N && w_col < K) ? w[static_cast<size_t>(w_row) * K + w_col] : 0.0f;
+//     // ============================================================
+//
+//     // ======================== BLANK 3.3 =========================
+//     // Add this K step's contribution to acc.
+//     __syncthreads();
+//     for (int k = 0; k < TILE; ++k) {
+//       acc += xs[ty][k] * ws[tx][k];
+//     }
+//     __syncthreads();
+//     // ============================================================
+//   }
+//
+//   // ======================== BLANK 3.4 =========================
+//   // Epilogue: for outputs inside y, add bias[col] (bias may be nullptr), apply
+//   // gelu() when act == ACT_GELU, and store.
+//   if (row < M && col < N) {
+//     if (bias != nullptr) {
+//       acc += bias[col];
+//     }
+//     if (act == ACT_GELU) {
+//       acc = gelu(acc);
+//     }
+//     y[static_cast<size_t>(row) * N + col] = acc;
+//   }
+//   // ============================================================
+// }
 
-  const int tx = threadIdx.x;
-  const int ty = threadIdx.y;
-  const int row = blockIdx.y * TILE + ty;  // the output row this thread computes
-  const int col = blockIdx.x * TILE + tx;  // the output column this thread computes
+__global__ void linear_tiled_kernel(const float* x, const float* w, const float* bias, float* y, int M, int N, int K, int act) {
+    __shared__ float xs[TILE][TILE];
+    __shared__ float ws[TILE][TILE + 1]; // + 1 to prevent shared memory bank conflicts
 
-  float acc = 0.0f;
-  for (int k0 = 0; k0 < K; k0 += TILE) {
-    // ======================== BLANK 3.1 =========================
-    // Load this thread's element of the x tile into xs. Use 0 outside x.
-    const int x_col = k0 + tx;
-    xs[ty][tx] = (row < M && x_col < K) ?  x[static_cast<size_t>(row) * K + x_col] : 0.0f;
-    // ============================================================
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int row = blockIdx.y * TILE + ty;
+    const int col = blockIdx.x * TILE + tx;
 
-    // ======================== BLANK 3.2 =========================
-    // Load this thread's element of the w tile, so that ws[n][k] holds
-    // w[blockIdx.x * TILE + n][k0 + k]. Use 0 outside w. Threads with consecutive
-    // tx must read consecutive addresses of w.
-    const int w_row = blockIdx.x * TILE + ty;
-    const int w_col = k0 + tx;
-    ws[ty][tx] = (w_row < N && w_col < K) ? w[static_cast<size_t>(w_row) * K + w_col] : 0.0f;
-    // ============================================================
+    float acc = 0.0f;
 
-    // ======================== BLANK 3.3 =========================
-    // Add this K step's contribution to acc.
-    __syncthreads();
-    for (int k = 0; k < TILE; ++k) {
-      acc += xs[ty][k] * ws[tx][k];
+    for (int k0 = 0; k0 < K; k0 += TILE) {
+        // vectorized global row pointer as 128-bit float4 vector
+        // reinterpret global row pointer as 128-bit float4 vector
+        const int x_col = k0 + tx;
+        if (row < M && x_col < K) {
+            xs[ty][tx] = x[static_cast<size_t>(row) * K + x_col];
+        } else {
+            xs[ty][tx] = 0.0f;
+        }
+
+        // vectorized load W into shared memory
+        const int w_row = blockIdx.x * TILE + ty;
+        const int w_col = k0 + tx;
+        if (w_row < N && w_col < K) {
+            ws[ty][tx] = w[static_cast<size_t>(w_row) * K + w_col];
+        } else {
+            ws[ty][tx] = 0.0f;
+        }
+
+        __syncthreads();
+
+        // Multiply-accumulate over shared memory tile
+        for (int k = 0; k < TILE; ++k) {
+            acc += xs[ty][k] * ws[tx][k];
+        }
+
+        __syncthreads();
     }
-    __syncthreads();
-    // ============================================================
-  }
 
-  // ======================== BLANK 3.4 =========================
-  // Epilogue: for outputs inside y, add bias[col] (bias may be nullptr), apply
-  // gelu() when act == ACT_GELU, and store.
-  if (row < M && col < N) {
-    if (bias != nullptr) {
-      acc += bias[col];
+
+    // epilogue: bias + GELU + Store
+    if (row < M && col < N) {
+        if (bias != nullptr) acc += bias[col];
+        if (act == ACT_GELU) acc = gelu(acc);
+        y[static_cast<size_t>(row) * N + col] = acc;
     }
-    if (act == ACT_GELU) {
-      acc = gelu(acc);
-    }
-    y[static_cast<size_t>(row) * N + col] = acc;
-  }
-  // ============================================================
 }
 
 ASR_API int launch_linear(const float* x, const float* w, const float* bias, float* y,
